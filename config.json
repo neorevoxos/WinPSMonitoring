@@ -1,0 +1,36 @@
+{
+    "logPath": "C:\\Monitoring\\Logs",
+    "intervalSeconds": 60,
+    "runtimeHours": 24,
+    "topCount": 10,
+    "deleteLogsAfterDays": 7,
+    "networkAdapter": "Ethernet",
+
+    "cpuThreshold": 50,
+    "ramThresholdPercent": 50,
+    "networkThresholdMB": 5,
+    "handleThreshold": 10000,
+    "threadThreshold": 200,
+
+    "cpuLogFileName": "cpu_monitor",
+    "netLogFileName": "net_monitor",
+
+    "logCpuEnabled": true,
+    "logNetEnabled": true,
+    "logCsvEnabled": true,
+    "zipArchiveEnabled": true,
+
+    "emailEnabled": true,
+    "smtpServer": "smtp.example.com",
+    "smtpPort": 587,
+    "smtpUser": "monitor@example.com",
+    "smtpPass": "DEIN_PASSWORT",
+    "mailFrom": "monitor@example.com",
+    "mailTo": "admin@example.com",
+
+    "teamsEnabled": false,
+    "teamsWebhookUrl": "https://your-teams-webhook",
+    "telegramEnabled": false,
+    "telegramToken": "your-telegram-bot-token",
+    "telegramChatId": "your-chat-id"
+}
