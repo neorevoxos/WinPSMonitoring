@@ -1,0 +1,71 @@
+$configPath = "$PSScriptRoot\config.json"
+if (!(Test-Path $configPath)) { Write-Error "Konfiguration fehlt."; exit }
+$config = Get-Content $configPath | ConvertFrom-Json
+
+$logPath = $config.logPath
+$cpuCount = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
+$totalRamMB = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB
+$ramThresholdMB = $totalRamMB * ($config.ramThresholdPercent / 100)
+
+$startTime = Get-Date
+$endTime = $startTime.AddHours($config.runtimeHours)
+if (!(Test-Path -Path $logPath)) { New-Item -Path $logPath -ItemType Directory | Out-Null }
+
+Write-Host "Monitoring lÃ¤uft bis $endTime..."
+
+while ((Get-Date) -lt $endTime) {
+    $timestamp = Get-Date
+    $dateStr = $timestamp.ToString("yyyyMMdd")
+    $cpuFile = Join-Path $logPath ($config.cpuLogFileName + "_" + $dateStr + ".txt")
+    $netFile = Join-Path $logPath ($config.netLogFileName + "_" + $dateStr + ".txt")
+    $cpuCsv = Join-Path $logPath ($config.cpuLogFileName + "_" + $dateStr + ".csv")
+
+    $procStats = Get-Process | Where-Object { $_.Name -ne "_Total" -and $_.Name -ne "Idle" } |
+        Select-Object @{Name = "Time"; Expression = { $timestamp }}, @{Name = "Name"; Expression = { $_.ProcessName }},
+                      @{Name = "PID"; Expression = { $_.IDProcess }},
+                      @{Name = "CPU"; Expression = { [math]::Round($_.PercentProcessorTime / $cpuCount, 2) }},
+                      @{Name = "RAM"; Expression = { [math]::Round($_.WorkingSetPrivate / 1MB, 2) }}
+
+    $filtered = $procStats | Where-Object { $_.CPU -ge $config.cpuThreshold -or $_.RAM -ge $ramThresholdMB -or $_.Handles -gt $config.handleThreshold -or $_.Threads -gt $config.threadThreshold }
+
+    foreach ($p in $filtered) {
+        if ($config.logCpuEnabled) {
+            $line = "[{0}] Process: {1} | PID: {2} | CPU: {3}% | RAM: {4} MB" -f $timestamp.ToString("yyyy-MM-dd HH:mm:ss"), $p.Name, $p.PID, $p.CPU, $p.RAM
+            Add-Content -Path $cpuFile -Value $line
+        }
+        if ($config.logCsvEnabled) {
+            $csv = "$($timestamp.ToString("yyyy-MM-dd HH:mm:ss")),$($p.Name),$($p.PID),$($p.CPU),$($p.RAM),$($p.Handles),$($p.Threads)"
+            Add-Content -Path $cpuCsv -Value $csv
+        }
+    }
+
+    if ($config.logNetEnabled) {
+        $adapter = Get-NetAdapterStatistics -Name $config.networkAdapter -ErrorAction SilentlyContinue
+        if ($adapter) {
+            $recv = [math]::Round($adapter.ReceivedBytes / 1MB, 2)
+            $sent = [math]::Round($adapter.SentBytes / 1MB, 2)
+            if ($recv -gt $config.networkThresholdMB -or $sent -gt $config.networkThresholdMB) {
+                $line = "[{0}] Network Adapter [{1}]: Received: {2} MB | Sent: {3} MB" -f $timestamp.ToString("yyyy-MM-dd HH:mm:ss"), $adapter.Name, $recv, $sent
+                Add-Content -Path $netFile -Value $line
+            }
+        }
+    }
+
+    if ($config.emailEnabled -and $filtered.Count -gt 0) {
+        $body = $filtered | ForEach-Object { "$($_.Name) CPU: $($_.CPU)% RAM: $($_.RAM)MB" } | Out-String
+        try {
+            Send-MailMessage -SmtpServer $config.smtpServer -Port $config.smtpPort -UseSsl `
+                -From $config.mailFrom -To $config.mailTo `
+                -Subject "âš ï¸ Hohe CPU/RAM-Auslastung" `
+                -Body $body `
+                -Credential (New-Object System.Management.Automation.PSCredential($config.smtpUser, (ConvertTo-SecureString $config.smtpPass -AsPlainText -Force)))
+        } catch {}
+    }
+
+    Start-Sleep -Seconds $config.intervalSeconds
+}
+
+if ($config.zipArchiveEnabled) {
+    $zipName = Join-Path $logPath ("MonitorLogs_" + $dateStr + ".zip")
+    Compress-Archive -Path (Join-Path $logPath "*_$dateStr.*") -DestinationPath $zipName -Force
+}
