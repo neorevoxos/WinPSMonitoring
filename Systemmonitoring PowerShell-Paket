@@ -11,7 +11,7 @@ $startTime = Get-Date
 $endTime = $startTime.AddHours($config.runtimeHours)
 if (!(Test-Path -Path $logPath)) { New-Item -Path $logPath -ItemType Directory | Out-Null }
 
-Write-Host "Monitoring lÃ¤uft bis $endTime..."
+Write-Host "Monitoring laeuft bis $endTime..."
 
 while ((Get-Date) -lt $endTime) {
     $timestamp = Get-Date
@@ -20,21 +20,35 @@ while ((Get-Date) -lt $endTime) {
     $netFile = Join-Path $logPath ($config.netLogFileName + "_" + $dateStr + ".txt")
     $cpuCsv = Join-Path $logPath ($config.cpuLogFileName + "_" + $dateStr + ".csv")
 
-    $procStats = Get-Process | Where-Object { $_.Name -ne "_Total" -and $_.Name -ne "Idle" } |
-        Select-Object @{Name = "Time"; Expression = { $timestamp }}, @{Name = "Name"; Expression = { $_.ProcessName }},
-                      @{Name = "PID"; Expression = { $_.IDProcess }},
-                      @{Name = "CPU"; Expression = { [math]::Round($_.PercentProcessorTime / $cpuCount, 2) }},
-                      @{Name = "RAM"; Expression = { [math]::Round($_.WorkingSetPrivate / 1MB, 2) }}
+    # Korrekte Prozessinformationen sammeln
+    $processes = Get-Process | Where-Object { $_.Name -ne "_Total" -and $_.Name -ne "Idle" }
+    $procStats = $processes | Select-Object @{Name = "Time"; Expression = { $timestamp }},
+                      @{Name = "Name"; Expression = { $_.ProcessName }},
+                      @{Name = "PID"; Expression = { $_.Id }},
+                      @{Name = "CPU"; Expression = { [math]::Round(($_.CPU / $cpuCount), 2) }},
+                      @{Name = "RAM"; Expression = { [math]::Round(($_.WorkingSet / 1MB), 2) }},
+                      @{Name = "Handles"; Expression = { $_.Handles }},
+                      @{Name = "Threads"; Expression = { $_.Threads.Count }}
 
-    $filtered = $procStats | Where-Object { $_.CPU -ge $config.cpuThreshold -or $_.RAM -ge $ramThresholdMB -or $_.Handles -gt $config.handleThreshold -or $_.Threads -gt $config.threadThreshold }
+    $filtered = $procStats | Where-Object { 
+        $_.CPU -ge $config.cpuThreshold -or 
+        $_.RAM -ge $ramThresholdMB -or 
+        $_.Handles -gt $config.handleThreshold -or 
+        $_.Threads -gt $config.threadThreshold 
+    }
 
     foreach ($p in $filtered) {
         if ($config.logCpuEnabled) {
-            $line = "[{0}] Process: {1} | PID: {2} | CPU: {3}% | RAM: {4} MB" -f $timestamp.ToString("yyyy-MM-dd HH:mm:ss"), $p.Name, $p.PID, $p.CPU, $p.RAM
+            $line = "[{0}] Process: {1} | PID: {2} | CPU: {3}% | RAM: {4} MB | Handles: {5} | Threads: {6}" -f 
+                $timestamp.ToString("yyyy-MM-dd HH:mm:ss"), $p.Name, $p.PID, $p.CPU, $p.RAM, $p.Handles, $p.Threads
             Add-Content -Path $cpuFile -Value $line
         }
         if ($config.logCsvEnabled) {
-            $csv = "$($timestamp.ToString("yyyy-MM-dd HH:mm:ss")),$($p.Name),$($p.PID),$($p.CPU),$($p.RAM),$($p.Handles),$($p.Threads)"
+            if (!(Test-Path -Path $cpuCsv)) {
+                # CSV-Header hinzufügen, wenn die Datei neu ist
+                Add-Content -Path $cpuCsv -Value "Timestamp,ProcessName,PID,CPU,RAM,Handles,Threads"
+            }
+            $csv = "$($timestamp.ToString('yyyy-MM-dd HH:mm:ss')),$($p.Name),$($p.PID),$($p.CPU),$($p.RAM),$($p.Handles),$($p.Threads)"
             Add-Content -Path $cpuCsv -Value $csv
         }
     }
@@ -45,21 +59,24 @@ while ((Get-Date) -lt $endTime) {
             $recv = [math]::Round($adapter.ReceivedBytes / 1MB, 2)
             $sent = [math]::Round($adapter.SentBytes / 1MB, 2)
             if ($recv -gt $config.networkThresholdMB -or $sent -gt $config.networkThresholdMB) {
-                $line = "[{0}] Network Adapter [{1}]: Received: {2} MB | Sent: {3} MB" -f $timestamp.ToString("yyyy-MM-dd HH:mm:ss"), $adapter.Name, $recv, $sent
+                $line = "[{0}] Network Adapter [{1}]: Received: {2} MB | Sent: {3} MB" -f 
+                    $timestamp.ToString("yyyy-MM-dd HH:mm:ss"), $adapter.Name, $recv, $sent
                 Add-Content -Path $netFile -Value $line
             }
         }
     }
 
     if ($config.emailEnabled -and $filtered.Count -gt 0) {
-        $body = $filtered | ForEach-Object { "$($_.Name) CPU: $($_.CPU)% RAM: $($_.RAM)MB" } | Out-String
+        $body = $filtered | ForEach-Object { "$($_.Name) CPU: $($_.CPU)% RAM: $($_.RAM)MB Handles: $($_.Handles) Threads: $($_.Threads)" } | Out-String
         try {
             Send-MailMessage -SmtpServer $config.smtpServer -Port $config.smtpPort -UseSsl `
                 -From $config.mailFrom -To $config.mailTo `
-                -Subject "âš ï¸ Hohe CPU/RAM-Auslastung" `
+                -Subject "Warnung: Hohe CPU/RAM-Auslastung" `
                 -Body $body `
                 -Credential (New-Object System.Management.Automation.PSCredential($config.smtpUser, (ConvertTo-SecureString $config.smtpPass -AsPlainText -Force)))
-        } catch {}
+        } catch {
+            Write-Error "E-Mail konnte nicht gesendet werden: $_"
+        }
     }
 
     Start-Sleep -Seconds $config.intervalSeconds
@@ -67,5 +84,8 @@ while ((Get-Date) -lt $endTime) {
 
 if ($config.zipArchiveEnabled) {
     $zipName = Join-Path $logPath ("MonitorLogs_" + $dateStr + ".zip")
-    Compress-Archive -Path (Join-Path $logPath "*_$dateStr.*") -DestinationPath $zipName -Force
+    $filesToZip = Get-ChildItem -Path $logPath -Filter "*_$dateStr.*"
+    if ($filesToZip.Count -gt 0) {
+        Compress-Archive -Path $filesToZip.FullName -DestinationPath $zipName -Force
+    }
 }
